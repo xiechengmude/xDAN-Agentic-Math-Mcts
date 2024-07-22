@@ -1,6 +1,25 @@
 # MCTSr: Mathematic as a Blackbox for LLM
 
-## Envoirment
+# Testing with GPT-4o-mini
+
+Adapted from [here](https://github.com/trotsky1997/MathBlackBox/).
+
+## Prep
+### Set the OPENAI_API_KEY in your environment
+`export OPENAI_API_KEY = <key>`
+
+### Create the Python virtual environment
+`python -m venv venv`
+
+## Run a benchmark, say, gsm8k
+`python run_with_earlystopping.py gpt-4o-mini gsm8k-gpt-4o-mini`
+
+Results saved in the folder name provided as second param above.
+
+## Check the accuracy
+`python anal.py gsm8k-gpt-4o-mini gsm8k-gpt-4o-mini`
+
+# Previous instructions below
 
 ### Server
 We need VLLM or other Openai compatible method.
