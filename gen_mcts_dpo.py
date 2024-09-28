@@ -7,6 +7,7 @@ import re
 from tqdm import tqdm
 from itertools import groupby
 import numpy as np
+from datetime import datetime
 
 data_folders = [
     './AIME-gpt-4o-mini-mcts-2-20240719054541/jsons',
@@ -119,53 +120,6 @@ def collect_paths(answers, gt, fathers, childs):
         paths.append(path)
     return paths
 
-def rereward(paths, answers, gt, fathers, childs, gemma=0.9):
-    structue_reward = {}
-    step_scores = {}
-    for path in paths:
-        for i, ix in enumerate(path):
-            if ix not in step_scores:
-                step_scores[ix] = []
-            step_scores[ix].append(1)  # 每个步骤的原始得分为1
-            structue_reward[ix] = gemma ** i if i > 5 else 1  # 只在步骤>5时应用衰减
-
-    if not structue_reward:
-        return {}, {}
-
-    path_list = []
-    for path in paths:
-        path_list.extend(path)
-
-    gemma2 = 0.5 * gemma
-    root_reward = min(structue_reward.values()) * gemma if structue_reward else 0
-
-    def get_reward(ans):
-        if ans is None:
-            structue_reward[ans] = root_reward
-            return structue_reward[ans]
-
-        if ans in path_list:
-            return structue_reward[ans]
-
-        if ans in structue_reward:
-            return structue_reward[ans]
-        if ans in fathers:
-            parent = fathers[ans]
-            if parent is None:
-                structue_reward[ans] = root_reward * gemma2
-                return structue_reward[ans]
-            if parent in structue_reward:
-                structue_reward[ans] = structue_reward[parent] * gemma2
-                return structue_reward[ans]
-            else:
-                structue_reward[ans] = get_reward(parent) * gemma2
-                return structue_reward[ans]
-
-    for ans in answers:
-        get_reward(ans)
-
-    return structue_reward, step_scores
-
 
 def get_refined_ans(history_bank, hints_list, answer_list):
     hints_map = {}
@@ -210,11 +164,53 @@ def collect_refine(paths, hints_reward_imp_bank, hints_map, structure_reward):
                                              groupby(re_hints_reward_imp_bank[ans], key=lambda x: x[1])]
     return re_hints_reward_imp_bank
 
-def pair_importance_sampling(rewards, actions, step_scores, nums):
+
+def refine_prompt(query, ans):
+    q = f'Since we have a weak Answer, could you provide me with a relection or feedback to correct this answer better? Analyze this Answer Strictly and Critic, point out every flaw for ervery possible imperfect to minus every possible score!\nLet\'s think step by step.'
+    return q
+
+def rereward(paths, answers, gt, fathers, childs, gemma=0.9):
+    structue_reward = {}
+    step_scores = {ans: [] for ans in answers}
+    for path in paths:
+        for i, ix in enumerate(path):
+            step_scores[ix].append(1)  # 原始步骤得分为1
+            structue_reward[ix] = gemma ** i
+
+    if not structue_reward:
+        return {}, {}
+
+    gemma2 = 0.5 * gemma
+    root_reward = min(structue_reward.values()) * gemma if structue_reward else 0
+
+    def get_reward(ans):
+        if ans is None or ans in structue_reward:
+            return structue_reward.get(ans, root_reward)
+        if ans in fathers:
+            parent = fathers[ans]
+            if parent is None:
+                structue_reward[ans] = root_reward * gemma2
+            else:
+                structue_reward[ans] = get_reward(parent) * gemma2
+        return structue_reward[ans]
+
+    for ans in answers:
+        if ans in structue_reward:
+            get_reward(ans)
+
+    # 移除没有得分的答案
+    structue_reward = {k: v for k, v in structue_reward.items() if v > 0}
+    step_scores = {k: v for k, v in step_scores.items() if k in structue_reward}
+
+    return structue_reward, step_scores
+
+def pair_importance_sampling(rewards, actions, nums):
+    if len(actions) < 2:
+        print(f"Warning: Not enough actions for sampling. Actions: {actions}")
+        return []
+
     weights = []
     action_pairs = []
-    pair_scores = []
-    pair_step_scores = []
 
     for i in range(len(actions)):
         for j in range(i + 1, len(actions)):
@@ -222,84 +218,91 @@ def pair_importance_sampling(rewards, actions, step_scores, nums):
             weights.append(reward_diff)
             if rewards[i] >= rewards[j]:
                 action_pairs.append([actions[i], actions[j]])
-                pair_scores.append([rewards[i], rewards[j]])
-                pair_step_scores.append([step_scores[actions[i]], step_scores[actions[j]]])
             else:
                 action_pairs.append([actions[j], actions[i]])
-                pair_scores.append([rewards[j], rewards[i]])
-                pair_step_scores.append([step_scores[actions[j]], step_scores[actions[i]]])
+
+    if not weights or sum(weights) == 0:
+        print(f"Warning: All weights are zero. Using uniform distribution. Rewards: {rewards}")
+        weights = [1] * len(action_pairs)
 
     weights = [weight / sum(weights) for weight in weights]
     action_pairs_index = list(range(len(action_pairs)))
 
-    sampled_actions_index = np.random.choice(action_pairs_index, size=nums, p=weights)
+    nums = min(nums, len(action_pairs))  # Ensure we don't sample more pairs than available
+    sampled_actions_index = np.random.choice(action_pairs_index, size=nums, p=weights, replace=False)
     sampled_actions = [action_pairs[index] for index in sampled_actions_index]
-    sampled_scores = [pair_scores[index] for index in sampled_actions_index]
-    sampled_step_scores = [pair_step_scores[index] for index in sampled_actions_index]
 
-    return sampled_actions, sampled_scores, sampled_step_scores
-
-
-def refine_prompt(query, ans):
-    q = f'Since we have a weak Answer, could you provide me with a relection or feedback to correct this answer better? Analyze this Answer Strictly and Critic, point out every flaw for ervery possible imperfect to minus every possible score!\nLet\'s think step by step.'
-    return q
-
+    return sampled_actions
 
 def process_file(file_path):
-    with open(file_path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-    
-    gold = [answer for answer in data['answers_list'] if check(data['ground_truth'], answer)]
+    print(f"Processing file: {file_path}")
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except json.JSONDecodeError:
+        print(f"Error decoding JSON from file: {file_path}")
+        return []
+    except Exception as e:
+        print(f"Error reading file {file_path}: {str(e)}")
+        return []
+
+    print(f"Data loaded. Answers list length: {len(data['answers_list'])}")
     
     data['fathers'] = fix_loops(data['answers_list'], data['fathers'], data['childs'])
     golden_paths = collect_paths(data['answers_list'], data['ground_truth'], data['fathers'], data['childs'])
     
+    print(f"Number of golden paths: {len(golden_paths)}")
     if not golden_paths:
         print(f"No golden paths found for file: {file_path}")
         return []
 
     structue_reward, step_scores = rereward(golden_paths, data['answers_list'], data['ground_truth'], data['fathers'], data['childs'])
 
+    print(f"Structure reward calculated. Length: {len(structue_reward)}")
+    if not structue_reward:
+        print(f"No valid rewards found for file: {file_path}")
+        return []
+
     hints_map = get_refined_ans(data['history_bank'], data['hints_list'], data['answers_list'])
     if not hints_map:
         print(f"No hints map found for file: {file_path}")
         return []
 
+    print(f"Hints map created. Length: {len(hints_map)}")
+
     re_hints_reward_imp_bank = collect_refine(golden_paths, data['hints_reward_imp_bank'], hints_map, structue_reward)
 
-    dpo_pairs_with_scores = []
+    dpo_pairs = []
     for path in golden_paths:
-        path_rewards = [structue_reward[node] for node in path]
-        if len(path) == 2:
-            dpo_pairs_with_scores.append({
+        valid_path = [node for node in path if node in structue_reward]
+        if len(valid_path) < 2:
+            continue
+        path_rewards = [structue_reward[node] for node in valid_path]
+        if len(valid_path) == 2:
+            dpo_pairs.append({
                 'query': data['query'],
-                'good': path[0],
-                'bad': path[-1],
-                'good_score': path_rewards[0],
-                'bad_score': path_rewards[-1],
-                'good_step_scores': step_scores[path[0]],
-                'bad_step_scores': step_scores[path[-1]]
+                'good': valid_path[0],
+                'bad': valid_path[-1],
+                'good_score': structue_reward[valid_path[0]],
+                'bad_score': structue_reward[valid_path[-1]],
+                'good_step_scores': step_scores[valid_path[0]],
+                'bad_step_scores': step_scores[valid_path[-1]]
             })
         else:
-            pairs, scores, step_scores_pairs = pair_importance_sampling(
-                path_rewards, path, step_scores, (len(path) ** 2) // 2
-            )
-            for pair, score, step_score_pair in zip(pairs, scores, step_scores_pairs):
-                dpo_pairs_with_scores.append({
+            pairs = pair_importance_sampling(path_rewards, valid_path, (len(valid_path) ** 2) // 2)
+            for pair in pairs:
+                dpo_pairs.append({
                     'query': data['query'],
                     'good': pair[0],
-                    'bad': pair[-1],
-                    'good_score': score[0],
-                    'bad_score': score[-1],
-                    'good_step_scores': step_score_pair[0],
-                    'bad_step_scores': step_score_pair[1],
-                    'intermediate_scores': path_rewards[path.index(pair[0]):path.index(pair[-1])+1]
+                    'bad': pair[1],
+                    'good_score': structue_reward[pair[0]],
+                    'bad_score': structue_reward[pair[1]],
+                    'good_step_scores': step_scores[pair[0]],
+                    'bad_step_scores': step_scores[pair[1]]
                 })
     
-    return dpo_pairs_with_scores
-
-
-
+    print(f"Generated {len(dpo_pairs)} DPO pairs for file: {file_path}")
+    return dpo_pairs
 
 # 创建一个函数来将 JSON 对象写入文件，每个对象一行
 def write_json_objects(file_path, json_objects):
