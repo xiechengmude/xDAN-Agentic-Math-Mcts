@@ -324,6 +324,17 @@ def write_json_objects(file_path, json_objects):
 # output_file_path = 'data_mistral7b_pathfinder_new_mcts_answers_10_percent.json'
 # write_json_objects(output_file_path, final_json_list[:len(final_json_list) // 2])
 
+def create_output_directory(base_path, dataset_name):
+    """创建输出目录"""
+    output_dir = os.path.join(base_path, 'output', dataset_name)
+    os.makedirs(output_dir, exist_ok=True)
+    return output_dir
+
+def get_output_filename(output_dir, prefix):
+    """生成带有时间戳的输出文件名"""
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    return os.path.join(output_dir, f"{prefix}_dpo_pairs_with_scores_{timestamp}.json")
+
 def main():
     data_folders = [
         './AIME-gpt-4o-mini-mcts-2-20240719054541/jsons',
@@ -335,41 +346,43 @@ def main():
         './olympiadbench-gpt4o-new-mcts-8-run2/jsons',
     ]
 
-    all_dpo_pairs = []
-
     for folder in data_folders:
         print(f"Processing folder: {folder}")
+        dataset_name = os.path.basename(os.path.dirname(folder))
+        output_dir = create_output_directory('.', dataset_name)
+        
+        all_dpo_pairs = []
+
         for file in tqdm(glob(os.path.join(folder, '*.json'))):
             dpo_pairs = process_file(file)
             all_dpo_pairs.extend(dpo_pairs)
 
-    # 随机打乱并取前10%
-    random.shuffle(all_dpo_pairs)
-    selected_pairs = all_dpo_pairs[:len(all_dpo_pairs) // 10]
+        # 随机打乱并取前10%
+        random.shuffle(all_dpo_pairs)
+        selected_pairs = all_dpo_pairs[:len(all_dpo_pairs) // 10]
 
-    # 保存结果
-    output_file = 'dpo_pairs_with_scores.json'
-    with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(selected_pairs, f, indent=2)
+        # 保存结果
+        output_file = get_output_filename(output_dir, dataset_name)
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(selected_pairs, f, indent=2)
 
-    print(f"Processed {len(all_dpo_pairs)} total pairs")
-    print(f"Selected {len(selected_pairs)} pairs (10%)")
-    print(f"Results saved to {output_file}")
+        print(f"Processed {len(all_dpo_pairs)} total pairs for {dataset_name}")
+        print(f"Selected {len(selected_pairs)} pairs (10%)")
+        print(f"Results saved to {output_file}")
 
-    # 打印一些示例结果
-    for item in selected_pairs[:5]:
-        print(f"Query: {item['query']}")
-        print(f"Good answer: {item['good']}")
-        print(f"  Final score: {item['good_score']}")
-        print(f"  Step scores: {item['good_step_scores']}")
-        print(f"Bad answer: {item['bad']}")
-        print(f"  Final score: {item['bad_score']}")
-        print(f"  Step scores: {item['bad_step_scores']}")
-        if 'intermediate_scores' in item:
-            print(f"Intermediate scores: {item['intermediate_scores']}")
-        print("---")
+        # 打印一些示例结果
+        for item in selected_pairs[:5]:
+            print(f"Query: {item['query']}")
+            print(f"Good answer: {item['good']}")
+            print(f"  Final score: {item['good_score']}")
+            print(f"  Step scores: {item['good_step_scores']}")
+            print(f"Bad answer: {item['bad']}")
+            print(f"  Final score: {item['bad_score']}")
+            print(f"  Step scores: {item['bad_step_scores']}")
+            if 'intermediate_scores' in item:
+                print(f"Intermediate scores: {item['intermediate_scores']}")
+            print("---")
 
 if __name__ == "__main__":
     main()
-
 
