@@ -119,24 +119,25 @@ def collect_paths(answers, gt, fathers, childs):
         paths.append(path)
     return paths
 
-
 def rereward(paths, answers, gt, fathers, childs, gemma=0.9):
     structue_reward = {}
+    step_scores = {}
     for path in paths:
-        print(f"Processing path: {path}")
         for i, ix in enumerate(path):
-            structue_reward[ix] = gemma ** i
+            if ix not in step_scores:
+                step_scores[ix] = []
+            step_scores[ix].append(1)  # 每个步骤的原始得分为1
+            structue_reward[ix] = gemma ** i if i > 5 else 1  # 只在步骤>5时应用衰减
 
     if not structue_reward:
-        print("No paths found. Skipping reward calculation.")
-        return {}
+        return {}, {}
 
     path_list = []
     for path in paths:
         path_list.extend(path)
 
     gemma2 = 0.5 * gemma
-    root_reward = min(structue_reward.values()) * gemma if structue_reward else 0  # 处理空序列
+    root_reward = min(structue_reward.values()) * gemma if structue_reward else 0
 
     def get_reward(ans):
         if ans is None:
@@ -163,7 +164,7 @@ def rereward(paths, answers, gt, fathers, childs, gemma=0.9):
     for ans in answers:
         get_reward(ans)
 
-    return structue_reward
+    return structue_reward, step_scores
 
 
 def get_refined_ans(history_bank, hints_list, answer_list):
@@ -209,34 +210,34 @@ def collect_refine(paths, hints_reward_imp_bank, hints_map, structure_reward):
                                              groupby(re_hints_reward_imp_bank[ans], key=lambda x: x[1])]
     return re_hints_reward_imp_bank
 
-
-def pair_importance_sampling(rewards, actions, nums):
-    # Initialize an empty list to store the importance weights
+def pair_importance_sampling(rewards, actions, step_scores, nums):
     weights = []
     action_pairs = []
+    pair_scores = []
+    pair_step_scores = []
 
-    # For each pair of actions
     for i in range(len(actions)):
         for j in range(i + 1, len(actions)):
-            # Calculate the difference in rewards
             reward_diff = abs(rewards[i] - rewards[j])
-
-            # Use the reward difference as the weight for this pair
             weights.append(reward_diff)
             if rewards[i] >= rewards[j]:
                 action_pairs.append([actions[i], actions[j]])
+                pair_scores.append([rewards[i], rewards[j]])
+                pair_step_scores.append([step_scores[actions[i]], step_scores[actions[j]]])
             else:
                 action_pairs.append([actions[j], actions[i]])
+                pair_scores.append([rewards[j], rewards[i]])
+                pair_step_scores.append([step_scores[actions[j]], step_scores[actions[i]]])
 
-    # Normalize the weights so they sum to 1
     weights = [weight / sum(weights) for weight in weights]
     action_pairs_index = list(range(len(action_pairs)))
 
-    # Sample from the actions according to the weights
     sampled_actions_index = np.random.choice(action_pairs_index, size=nums, p=weights)
     sampled_actions = [action_pairs[index] for index in sampled_actions_index]
+    sampled_scores = [pair_scores[index] for index in sampled_actions_index]
+    sampled_step_scores = [pair_step_scores[index] for index in sampled_actions_index]
 
-    return sampled_actions
+    return sampled_actions, sampled_scores, sampled_step_scores
 
 
 def refine_prompt(query, ans):
@@ -244,57 +245,60 @@ def refine_prompt(query, ans):
     return q
 
 
-# 主函数中，处理空路径情况并调用修复后的函数
-for data_folder in data_folders:
-    for file in tqdm(glob(data_folder + '/*')):
-        data = json.load(open(file, 'r', encoding='utf-8'))
-        gold = []
-        for answer in data['answers_list']:
-            if check(data['ground_truth'], answer):
-                gold.append(answer)
-        data['fathers'] = fix_loops(data['answers_list'], data['fathers'], data['childs'])
-        golden_paths = collect_paths(data['answers_list'], data['ground_truth'], data['fathers'], data['childs'])
+def process_file(file_path):
+    with open(file_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    
+    gold = [answer for answer in data['answers_list'] if check(data['ground_truth'], answer)]
+    
+    data['fathers'] = fix_loops(data['answers_list'], data['fathers'], data['childs'])
+    golden_paths = collect_paths(data['answers_list'], data['ground_truth'], data['fathers'], data['childs'])
+    
+    if not golden_paths:
+        print(f"No golden paths found for file: {file_path}")
+        return []
 
-        if not golden_paths:
-            print(f"No golden paths found for file: {file}")
-            continue  # 跳过没有路径的数据
+    structue_reward, step_scores = rereward(golden_paths, data['answers_list'], data['ground_truth'], data['fathers'], data['childs'])
 
-        structue_reward = rereward(golden_paths, data['answers_list'], data['ground_truth'], data['fathers'],
-                                   data['childs'])
+    hints_map = get_refined_ans(data['history_bank'], data['hints_list'], data['answers_list'])
+    if not hints_map:
+        print(f"No hints map found for file: {file_path}")
+        return []
 
-        hints_map = get_refined_ans(data['history_bank'], data['hints_list'], data['answers_list'])
-        if not hints_map:
-            print(f"No hints map found for file: {file}")
-            continue  # 跳过没有提示映射的数据
+    re_hints_reward_imp_bank = collect_refine(golden_paths, data['hints_reward_imp_bank'], hints_map, structue_reward)
 
-        re_hints_reward_imp_bank = collect_refine(golden_paths, data['hints_reward_imp_bank'], hints_map,
-                                                  structue_reward)
+    dpo_pairs_with_scores = []
+    for path in golden_paths:
+        path_rewards = [structue_reward[node] for node in path]
+        if len(path) == 2:
+            dpo_pairs_with_scores.append({
+                'query': data['query'],
+                'good': path[0],
+                'bad': path[-1],
+                'good_score': path_rewards[0],
+                'bad_score': path_rewards[-1],
+                'good_step_scores': step_scores[path[0]],
+                'bad_step_scores': step_scores[path[-1]]
+            })
+        else:
+            pairs, scores, step_scores_pairs = pair_importance_sampling(
+                path_rewards, path, step_scores, (len(path) ** 2) // 2
+            )
+            for pair, score, step_score_pair in zip(pairs, scores, step_scores_pairs):
+                dpo_pairs_with_scores.append({
+                    'query': data['query'],
+                    'good': pair[0],
+                    'bad': pair[-1],
+                    'good_score': score[0],
+                    'bad_score': score[-1],
+                    'good_step_scores': step_score_pair[0],
+                    'bad_step_scores': step_score_pair[1],
+                    'intermediate_scores': path_rewards[path.index(pair[0]):path.index(pair[-1])+1]
+                })
+    
+    return dpo_pairs_with_scores
 
-        dpo_pairs = []  # q, good, bad
-        for path in golden_paths:  # golden path from right answer to wrong root answers
-            if len(path) > 1:
-                for i, ix in enumerate(path):
-                    if ix in gold and i != 0:
-                        path.remove(ix)
-            if len(path) <= 1:
-                golden_paths.remove(path)
 
-        for path in golden_paths:
-            if len(path) == 2:
-                dpo_pairs.append([data['query'], path[0], path[-1]])
-            else:
-                pairs = pair_importance_sampling([structue_reward[node] for node in path], path, (len(path) ** 2) // 2)
-                pairs = [[data['query'], pair[0], pair[-1]] for pair in pairs]
-                dpo_pairs.extend(pairs)
-
-        for dpo_pair in dpo_pairs:
-            final_json_list.append(get_json(*dpo_pair))
-
-
-# with open('data_mistral7b_pathfinder_new_mcts_answers_10_percent.json', 'w') as f:
-#     random.shuffle(final_json_list)
-#     print(len(final_json_list))
-#     json.dump(final_json_list[:len(final_json_list) // 100], f)
 
 
 # 创建一个函数来将 JSON 对象写入文件，每个对象一行
@@ -312,14 +316,60 @@ def write_json_objects(file_path, json_objects):
         f.write('\n]\n')
 
 
-# 随机打乱列表
-random.shuffle(final_json_list)
-print(len(final_json_list))
+# # 随机打乱列表
+# random.shuffle(final_json_list)
+# print(len(final_json_list))
 
-# 写入前百分之一的 JSON 对象，每个对象一行
-output_file_path = 'data_mistral7b_pathfinder_new_mcts_answers_10_percent.json'
-write_json_objects(output_file_path, final_json_list[:len(final_json_list) // 2])
+# # 写入前百分之一的 JSON 对象，每个对象一行
+# output_file_path = 'data_mistral7b_pathfinder_new_mcts_answers_10_percent.json'
+# write_json_objects(output_file_path, final_json_list[:len(final_json_list) // 2])
 
+def main():
+    data_folders = [
+        './AIME-gpt-4o-mini-mcts-2-20240719054541/jsons',
+        './GAIC-gpt-4o-mini-new-mcts-8-20240719054541/jsons',
+        './gsm8k-gpt-4o-mini/jsons',
+        './gsm8k-gpt-4o-mini-new-mcts-8-20240719054541/jsons',
+        './gsmhard-gpt-4o-mini-run2/jsons',
+        './MATH-gpt-4o-mini-new-mcts-8-20240719054541/jsons',
+        './olympiadbench-gpt4o-new-mcts-8-run2/jsons',
+    ]
 
+    all_dpo_pairs = []
+
+    for folder in data_folders:
+        print(f"Processing folder: {folder}")
+        for file in tqdm(glob(os.path.join(folder, '*.json'))):
+            dpo_pairs = process_file(file)
+            all_dpo_pairs.extend(dpo_pairs)
+
+    # 随机打乱并取前10%
+    random.shuffle(all_dpo_pairs)
+    selected_pairs = all_dpo_pairs[:len(all_dpo_pairs) // 10]
+
+    # 保存结果
+    output_file = 'dpo_pairs_with_scores.json'
+    with open(output_file, 'w', encoding='utf-8') as f:
+        json.dump(selected_pairs, f, indent=2)
+
+    print(f"Processed {len(all_dpo_pairs)} total pairs")
+    print(f"Selected {len(selected_pairs)} pairs (10%)")
+    print(f"Results saved to {output_file}")
+
+    # 打印一些示例结果
+    for item in selected_pairs[:5]:
+        print(f"Query: {item['query']}")
+        print(f"Good answer: {item['good']}")
+        print(f"  Final score: {item['good_score']}")
+        print(f"  Step scores: {item['good_step_scores']}")
+        print(f"Bad answer: {item['bad']}")
+        print(f"  Final score: {item['bad_score']}")
+        print(f"  Step scores: {item['bad_step_scores']}")
+        if 'intermediate_scores' in item:
+            print(f"Intermediate scores: {item['intermediate_scores']}")
+        print("---")
+
+if __name__ == "__main__":
+    main()
 
 
