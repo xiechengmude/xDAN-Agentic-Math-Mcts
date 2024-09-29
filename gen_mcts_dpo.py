@@ -175,7 +175,14 @@ def rereward(paths, answers, gt, fathers, childs, gemma=0.9):
     for path in paths:
         for i, ix in enumerate(path):
             step_scores[ix].append(1)  # 原始步骤得分为1
-            structue_reward[ix] = gemma ** i
+            if path_length > 8:
+                # 只有当路径长度大于8时才应用衰减
+                structue_reward[ix] = gemma ** max(0, i - 8)
+            else:
+                # 对于8步或更短的路径，给予统一的满分奖励
+                structue_reward[ix] = 1
+
+            # structue_reward[ix] = gemma ** i
 
     if not structue_reward:
         return {}, {}
@@ -340,13 +347,13 @@ def get_output_filename(output_dir, prefix):
 
 def main():
     data_folders = [
-        './AIME-gpt-4o-mini-mcts-2-20240719054541/jsons',
-        './GAIC-gpt-4o-mini-new-mcts-8-20240719054541/jsons',
-        './gsm8k-gpt-4o-mini/jsons',
-        './gsm8k-gpt-4o-mini-new-mcts-8-20240719054541/jsons',
-        './gsmhard-gpt-4o-mini-run2/jsons',
-        './MATH-gpt-4o-mini-new-mcts-8-20240719054541/jsons',
-        './olympiadbench-gpt4o-new-mcts-8-run2/jsons',
+        '../dataset/AIME-gpt-4o-mini-mcts-2-20240719054541/jsons',
+        '../dataset/GAIC-gpt-4o-mini-new-mcts-8-20240719054541/jsons',
+        '../dataset/gsm8k-gpt-4o-mini/jsons',
+        '../dataset/gsm8k-gpt-4o-mini-new-mcts-8-20240719054541/jsons',
+        '../dataset/gsmhard-gpt-4o-mini-run2/jsons',
+        '../dataset/MATH-gpt-4o-mini-new-mcts-8-20240719054541/jsons',
+        '../dataset/olympiadbench-gpt4o-new-mcts-8-run2/jsons',
     ]
 
     for folder in data_folders:
