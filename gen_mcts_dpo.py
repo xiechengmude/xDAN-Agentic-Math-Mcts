@@ -227,6 +227,7 @@ def rereward(paths, answers, gt, fathers, childs, gemma=0.9, ucb_bank=None):
     return structue_reward, step_scores, step_sentences
 
 
+
 def pair_importance_sampling(rewards, actions, nums):
     if len(actions) < 2:
         print(f"Warning: Not enough actions for sampling. Actions: {actions}")
@@ -263,7 +264,6 @@ def pair_importance_sampling(rewards, actions, nums):
 
     return sampled_actions
 
-
 def process_file(file_path):
     print(f"Processing file: {file_path}")
     try:
@@ -287,7 +287,7 @@ def process_file(file_path):
         return []
 
     structue_reward, step_scores, step_sentences = rereward(golden_paths, data['answers_list'], data['ground_truth'],
-                                                            data['fathers'], data['childs'])
+                                                            data['fathers'], data['childs'], ucb_bank=data.get('ucb_bank', {}))
 
     print(f"Structure reward calculated. Length: {len(structue_reward)}")
     if not structue_reward:
@@ -367,6 +367,7 @@ def process_file(file_path):
 
     print(f"Generated {len(dpo_pairs)} DPO pairs for file: {file_path}")
     return dpo_pairs
+
 
 
 # 创建一个函数来将 JSON 对象写入文件，每个对象一行
